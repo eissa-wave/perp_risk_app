@@ -56,14 +56,6 @@ st.caption("Live view across Hyperliquid, Binance, Bybit, and OKX (read from Goo
 # ============================================================
 #  SHEET LOADER
 # ============================================================
-@st.cache_data(ttl=30, show_spinner=False)
-def load_sheet():
-    """Pull the entire risk monitor tab as a list of rows."""
-    creds = Credentials.from_service_account_file(GOOGLE_CREDS_FILE, scopes=GSHEET_SCOPES)
-    gc = gspread.authorize(creds)
-    sh = gc.open(SHEET_NAME)
-    ws = sh.worksheet(TAB_RISK)
-    return ws.get_all_values()
 
 
 def _parse_sheet(rows: list[list[str]]):
