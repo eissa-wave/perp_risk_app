@@ -21,13 +21,23 @@ from google.oauth2.service_account import Credentials
 
 
 # ---- Config (must match risk_monitor.py) ----
-GOOGLE_CREDS_FILE = "portfolio-pnl-e2fa6303206c.json"
+#GOOGLE_CREDS_FILE = "portfolio-pnl-e2fa6303206c.json"
 SHEET_NAME = "Portfolios"
 TAB_RISK = "perp_monitor"
 GSHEET_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_sheet():
+    creds = Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]), scopes=GSHEET_SCOPES
+    )
+    gc = gspread.authorize(creds)
+    sh = gc.open(SHEET_NAME)
+    ws = sh.worksheet(TAB_RISK)
+    return ws.get_all_values()
 
 EXCHANGE_CURRENCY = {
     "Hyperliquid": "USDC",
