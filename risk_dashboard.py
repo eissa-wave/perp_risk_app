@@ -31,6 +31,7 @@ GSHEET_SCOPES = [
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_sheet():
+    """Pull the entire risk monitor tab as a list of rows."""
     creds = Credentials.from_service_account_info(
         dict(st.secrets["gcp_service_account"]), scopes=GSHEET_SCOPES
     )
