@@ -31,7 +31,6 @@ GSHEET_SCOPES = [
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_sheet():
-    """Pull the entire risk monitor tab as a list of rows."""
     creds = Credentials.from_service_account_info(
         dict(st.secrets["gcp_service_account"]), scopes=GSHEET_SCOPES
     )
@@ -42,6 +41,7 @@ def load_sheet():
 
 EXCHANGE_CURRENCY = {
     "Hyperliquid": "USDC",
+    "Hyperliquid:xyz": "USDC",
     "Binance": "USDT",
     "Bybit": "USD",
     "OKX": "USD",
@@ -53,15 +53,11 @@ st.title("Wave Perp Risk Dashboard")
 st.caption("Live view across Hyperliquid, Binance, Bybit, and OKX (read from Google Sheets)")
 
 
-# ============================================================
-#  SHEET LOADER
-# ============================================================
-
-
 def _parse_sheet(rows: list[list[str]]):
     """
-    The sheet has three labeled sections separated by blank rows:
-      Per-Exchange Summary, Per-Position Detail, Thresholds.
+    The sheet has labeled sections separated by blank rows:
+      Per-Exchange Summary, Per-Position Detail, Strategy PnL (funding arb),
+      Thresholds.
     Find each by section header and parse into a DataFrame.
     """
     snapshot_ts = ""
@@ -84,6 +80,7 @@ def _parse_sheet(rows: list[list[str]]):
 
     summary_rows = _section_slice("Per-Exchange Summary")
     position_rows = _section_slice("Per-Position Detail")
+    strategy_rows = _section_slice("Strategy PnL (funding arb)")
     threshold_rows = _section_slice("Thresholds")
 
     summary_df = pd.DataFrame()
@@ -93,7 +90,8 @@ def _parse_sheet(rows: list[list[str]]):
         summary_df = pd.DataFrame(data, columns=header)
         # Numeric columns
         for col in ["Positions", "Removable", "Leverage", "Gross Notional",
-                    "Net Delta", "Account Equity", "Withdrawable / adjEq", "OKX mgnRatio"]:
+                    "Net Delta", "Account Equity", "Withdrawable / adjEq",
+                    "OKX mgnRatio", "Account mgnRatio"]:
             if col in summary_df.columns:
                 summary_df[col] = pd.to_numeric(summary_df[col], errors="coerce")
 
@@ -103,16 +101,28 @@ def _parse_sheet(rows: list[list[str]]):
         data = position_rows[1:]
         positions_df = pd.DataFrame(data, columns=header)
         for col in ["Size", "Notional (signed)", "Mark", "Liq Price",
-                    "Dist to Liq %", "Isolated Removable"]:
+                    "Dist to Liq %", "Isolated Removable", "Funding Collected"]:
             if col in positions_df.columns:
                 positions_df[col] = pd.to_numeric(positions_df[col], errors="coerce")
 
+    strategy_df = pd.DataFrame()
+    if strategy_rows:
+        header = strategy_rows[0]
+        data = strategy_rows[1:]
+        strategy_df = pd.DataFrame(data, columns=header)
+        for col in ["Total Funding", "Avg Leg Size", "Funding / Notional (%)",
+                    "Funding Annualized (%)"]:
+            if col in strategy_df.columns:
+                strategy_df[col] = pd.to_numeric(strategy_df[col], errors="coerce")
+
     thresholds = {}
-    for r in threshold_rows[1:] if threshold_rows else []:
+    # Unlike the table sections, Thresholds has no column-header row, so do not
+    # skip the first row.
+    for r in threshold_rows if threshold_rows else []:
         if len(r) >= 2 and r[0]:
             thresholds[r[0]] = r[1]
 
-    return snapshot_ts, summary_df, positions_df, thresholds
+    return snapshot_ts, summary_df, positions_df, strategy_df, thresholds
 
 
 # ============================================================
@@ -134,7 +144,7 @@ with st.spinner("Loading from Google Sheets..."):
         st.error(f"Failed to load sheet: {exc}")
         st.stop()
 
-snapshot_ts, summary_df, positions_df, thresholds = _parse_sheet(rows)
+snapshot_ts, summary_df, positions_df, strategy_df, thresholds = _parse_sheet(rows)
 
 if summary_df.empty:
     st.warning("Sheet is empty or could not be parsed. Run the risk script to populate it.")
@@ -167,10 +177,10 @@ st.divider()
 
 
 # ============================================================
-#  TABS: Combined + per-exchange + raw
+#  TABS: Combined + per-exchange + strategy pnl + raw
 # ============================================================
-tab_combined, *exchange_tabs, tab_raw = st.tabs(
-    ["Combined"] + exchanges_in_sheet + ["Raw sheet"]
+tab_combined, *exchange_tabs, tab_pnl, tab_raw = st.tabs(
+    ["Combined"] + exchanges_in_sheet + ["Strategy PnL", "Raw sheet"]
 )
 
 
@@ -196,6 +206,17 @@ def _format_positions_df(df: pd.DataFrame) -> pd.DataFrame:
     # Sort by dist asc, NaN last
     df = df.sort_values("Dist to Liq %", na_position="last").reset_index(drop=True)
     return df
+
+
+_POSITION_FMT = {
+    "Size": "{:,.4f}",
+    "Notional (signed)": "{:+,.0f}",
+    "Mark": "{:,.6f}",
+    "Liq Price": "{:,.6f}",
+    "Dist to Liq %": "{:.2f}%",
+    "Isolated Removable": "{:,.2f}",
+    "Funding Collected": "{:+,.2f}",
+}
 
 
 # ---- Combined tab ----
@@ -224,6 +245,7 @@ with tab_combined:
         ("Account Equity", "{:,.2f}"),
         ("Withdrawable / adjEq", "{:,.2f}"),
         ("OKX mgnRatio", "{:.2f}x"),
+        ("Account mgnRatio", "{:.2f}x"),
     ]:
         if col in display_summary.columns:
             display_summary[col] = display_summary[col].apply(
@@ -237,14 +259,7 @@ with tab_combined:
     else:
         all_df = _format_positions_df(positions_df)
         st.dataframe(
-            all_df.style.format({
-                "Size": "{:,.4f}",
-                "Notional (signed)": "{:+,.0f}",
-                "Mark": "{:,.6f}",
-                "Liq Price": "{:,.6f}",
-                "Dist to Liq %": "{:.2f}%",
-                "Isolated Removable": "{:,.2f}",
-            }, na_rep="—"),
+            all_df.style.format(_POSITION_FMT, na_rep="—"),
             use_container_width=True,
             hide_index=True,
         )
@@ -264,16 +279,18 @@ for tab, exch in zip(exchange_tabs, exchanges_in_sheet):
         ccy = EXCHANGE_CURRENCY.get(exch, "USD")
         st.subheader(f"{exch} positions ({ccy})")
 
+        mgn_col = "Account mgnRatio" if "Account mgnRatio" in summary_df.columns else "OKX mgnRatio"
+        mgn_val = row.get(mgn_col)
+
         # Per-exchange top metrics
-        if exch == "OKX" and pd.notna(row.get("OKX mgnRatio")):
+        if pd.notna(mgn_val):
             a, b, c, d, e = st.columns(5)
             a.metric("Open positions", int(row["Positions"]) if pd.notna(row["Positions"]) else 0)
             b.metric("Net delta", f"{row['Net Delta']:+,.0f} {ccy}" if pd.notna(row["Net Delta"]) else "N/A")
             c.metric("Gross notional", f"{row['Gross Notional']:,.0f} {ccy}" if pd.notna(row["Gross Notional"]) else "N/A")
             d.metric("Removable", f"{row['Removable']:,.0f} {ccy}" if pd.notna(row["Removable"]) else "N/A")
-            mgn = row["OKX mgnRatio"]
-            equity_buffer = (1 - 1.0 / mgn) * 100 if mgn and mgn > 0 else 0.0
-            e.metric("Account mgnRatio", f"{mgn:.2f}x", delta=f"{equity_buffer:.1f}% equity buffer", delta_color="off")
+            equity_buffer = (1 - 1.0 / mgn_val) * 100 if mgn_val and mgn_val > 0 else 0.0
+            e.metric("Account mgnRatio", f"{mgn_val:.2f}x", delta=f"{equity_buffer:.1f}% equity buffer", delta_color="off")
         else:
             a, b, c, d = st.columns(4)
             a.metric("Open positions", int(row["Positions"]) if pd.notna(row["Positions"]) else 0)
@@ -290,29 +307,97 @@ for tab, exch in zip(exchange_tabs, exchanges_in_sheet):
             # Drop the Exchange column since this tab is already exchange-specific
             display_cols = [c for c in ex_positions.columns if c != "Exchange"]
             st.dataframe(
-                ex_positions[display_cols].style.format({
-                    "Size": "{:,.4f}",
-                    "Notional (signed)": "{:+,.0f}",
-                    "Mark": "{:,.6f}",
-                    "Liq Price": "{:,.6f}",
-                    "Dist to Liq %": "{:.2f}%",
-                    "Isolated Removable": "{:,.2f}",
-                }, na_rep="—"),
+                ex_positions[display_cols].style.format(_POSITION_FMT, na_rep="—"),
                 use_container_width=True,
                 hide_index=True,
             )
 
         # OKX-specific footer explaining the framing
         if exch == "OKX":
-            mgn = row.get("OKX mgnRatio")
-            if pd.notna(mgn) and mgn > 0:
-                buffer_pct = (1 - 1.0 / mgn) * 100
+            if pd.notna(mgn_val) and mgn_val > 0:
+                buffer_pct = (1 - 1.0 / mgn_val) * 100
                 st.caption(
                     f"OKX cross-margin safety is evaluated at the account level via mgnRatio "
                     f"(adjEq / mmr). Liquidation triggers at 1.00x; OKX itself warns at 3.00x. "
-                    f"Current: **{mgn:.2f}x** ({buffer_pct:.1f}% equity buffer). "
+                    f"Current: **{mgn_val:.2f}x** ({buffer_pct:.1f}% equity buffer). "
                     f"Cross positions show no per-position liq price by design; safety is the account-level ratio."
                 )
+
+
+# ---- Strategy PnL tab ----
+with tab_pnl:
+    st.subheader("Strategy PnL (funding arb)")
+
+    if strategy_df.empty:
+        st.info(
+            "No Strategy PnL section found in the sheet. "
+            "Run the latest risk script (with funding collection) to populate it."
+        )
+    else:
+        # Top-line metrics
+        total_funding = strategy_df["Total Funding"].sum() if "Total Funding" in strategy_df.columns else float("nan")
+        n_strats = len(strategy_df)
+        best_idx = None
+        if "Funding Annualized (%)" in strategy_df.columns and strategy_df["Funding Annualized (%)"].notna().any():
+            best_idx = strategy_df["Funding Annualized (%)"].idxmax()
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Strategies", n_strats)
+        m2.metric("Total funding collected", f"{total_funding:+,.2f}" if pd.notna(total_funding) else "N/A")
+        if best_idx is not None:
+            best = strategy_df.loc[best_idx]
+            m3.metric(
+                f"Best annualized: {best['Strategy']}",
+                f"{best['Funding Annualized (%)']:.2f}%",
+            )
+        else:
+            m3.metric("Best annualized", "N/A")
+
+        st.markdown("##### Per-strategy funding")
+        display_strat = strategy_df.copy()
+        if "Funding Annualized (%)" in display_strat.columns:
+            display_strat = display_strat.sort_values(
+                "Funding Annualized (%)", ascending=False, na_position="last"
+            ).reset_index(drop=True)
+        st.dataframe(
+            display_strat.style.format({
+                "Total Funding": "{:+,.2f}",
+                "Avg Leg Size": "{:,.4f}",
+                "Funding / Notional (%)": "{:.4f}%",
+                "Funding Annualized (%)": "{:.2f}%",
+            }, na_rep="—"),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # Bar chart of annualized funding per strategy
+        if "Funding Annualized (%)" in strategy_df.columns and strategy_df["Funding Annualized (%)"].notna().any():
+            st.markdown("##### Annualized funding by strategy")
+            chart_df = strategy_df.dropna(subset=["Funding Annualized (%)"]).set_index("Strategy")
+            st.bar_chart(chart_df["Funding Annualized (%)"])
+
+        # Per-position funding breakdown (legs)
+        if not positions_df.empty and "Funding Collected" in positions_df.columns:
+            st.markdown("##### Per-leg funding detail")
+            leg_cols = [c for c in ["Exchange", "Symbol", "Direction",
+                                    "Notional (signed)", "Funding Collected"]
+                        if c in positions_df.columns]
+            legs_df = positions_df[leg_cols].sort_values("Funding Collected", ascending=False, na_position="last")
+            st.dataframe(
+                legs_df.style.format({
+                    "Notional (signed)": "{:+,.0f}",
+                    "Funding Collected": "{:+,.2f}",
+                }, na_rep="—"),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # Surface the funding-window context from Thresholds if present
+        notes = {k: v for k, v in thresholds.items()
+                 if k in ("Funding window", "Funding note", "Strategy note")}
+        if notes:
+            for k, v in notes.items():
+                st.caption(f"**{k}:** {v}")
 
 
 # ---- Raw sheet tab ----
