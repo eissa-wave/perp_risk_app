@@ -83,11 +83,24 @@ def _parse_sheet(rows: list[list[str]]):
     strategy_rows = _section_slice("Strategy PnL (funding arb)")
     threshold_rows = _section_slice("Thresholds")
 
-    summary_df = pd.DataFrame()
-    if summary_rows:
-        header = summary_rows[0]
-        data = summary_rows[1:]
-        summary_df = pd.DataFrame(data, columns=header)
+    def _to_df(section_rows: list) -> pd.DataFrame:
+        """Build a DataFrame from [header, *data], trimming the trailing empty
+        columns that the sheet writer pads narrower tables with (duplicate ''
+        column names break Streamlit/pyarrow serialization)."""
+        if not section_rows:
+            return pd.DataFrame()
+        header = section_rows[0]
+        n = len(header)
+        while n > 0 and header[n - 1] == "":
+            n -= 1
+        if n == 0:
+            return pd.DataFrame()
+        header = header[:n]
+        data = [r[:n] + [""] * (n - len(r[:n])) for r in section_rows[1:]]
+        return pd.DataFrame(data, columns=header)
+
+    summary_df = _to_df(summary_rows)
+    if not summary_df.empty:
         # Numeric columns
         for col in ["Positions", "Removable", "Leverage", "Gross Notional",
                     "Net Delta", "Account Equity", "Withdrawable / adjEq",
@@ -95,21 +108,15 @@ def _parse_sheet(rows: list[list[str]]):
             if col in summary_df.columns:
                 summary_df[col] = pd.to_numeric(summary_df[col], errors="coerce")
 
-    positions_df = pd.DataFrame()
-    if position_rows:
-        header = position_rows[0]
-        data = position_rows[1:]
-        positions_df = pd.DataFrame(data, columns=header)
+    positions_df = _to_df(position_rows)
+    if not positions_df.empty:
         for col in ["Size", "Notional (signed)", "Mark", "Liq Price",
                     "Dist to Liq %", "Isolated Removable", "Funding Collected"]:
             if col in positions_df.columns:
                 positions_df[col] = pd.to_numeric(positions_df[col], errors="coerce")
 
-    strategy_df = pd.DataFrame()
-    if strategy_rows:
-        header = strategy_rows[0]
-        data = strategy_rows[1:]
-        strategy_df = pd.DataFrame(data, columns=header)
+    strategy_df = _to_df(strategy_rows)
+    if not strategy_df.empty:
         for col in ["Total Funding", "Avg Leg Size", "Funding / Notional (%)",
                     "Funding Annualized (%)"]:
             if col in strategy_df.columns:
