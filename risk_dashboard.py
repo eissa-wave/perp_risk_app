@@ -377,12 +377,6 @@ with tab_pnl:
             hide_index=True,
         )
 
-        # Bar chart of annualized funding per strategy
-        if "Funding Annualized (%)" in strategy_df.columns and strategy_df["Funding Annualized (%)"].notna().any():
-            st.markdown("##### Annualized funding by strategy")
-            chart_df = strategy_df.dropna(subset=["Funding Annualized (%)"]).set_index("Strategy")
-            st.bar_chart(chart_df["Funding Annualized (%)"])
-
         # Per-position funding breakdown (legs)
         if not positions_df.empty and "Funding Collected" in positions_df.columns:
             st.markdown("##### Per-leg funding detail")
@@ -401,7 +395,7 @@ with tab_pnl:
 
         # Surface the funding-window context from Thresholds if present
         notes = {k: v for k, v in thresholds.items()
-                 if k in ("Funding window", "Funding note", "Strategy note")}
+                 if k in ("Funding window", "Strategy note")}
         if notes:
             for k, v in notes.items():
                 st.caption(f"**{k}:** {v}")
